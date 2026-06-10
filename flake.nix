@@ -105,6 +105,10 @@
           imports = [./nix/modules/client.nix];
           programs.horde.client.package =
             lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde;
+          # Priority 1001 (one below mkDefault) so this never conflicts with
+          # the server wrapper's mkDefault when both modules are imported.
+          programs.horde.runner.package =
+            lib.mkOverride 1001 self.packages.${pkgs.stdenv.hostPlatform.system}.horde-run;
         };
         server = {
           lib,
@@ -112,7 +116,7 @@
           ...
         }: {
           imports = [./nix/modules/server.nix];
-          programs.horde.server.package =
+          programs.horde.runner.package =
             lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde-run;
         };
       in {

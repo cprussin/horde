@@ -6,9 +6,9 @@ whichever machine is best.
 You type a prompt; horde figures out which project in `~/Projects` you mean
 (using a cheap headless Claude routing call against each project's
 `CLAUDE.md`), picks a host (local, or a remote server if it's reachable with
-low latency), and launches `claude --dangerously-skip-permissions` in that
-project — contained inside Claude Code's native OS sandbox (bubblewrap +
-socat), which horde force-enables for every session.
+low latency), and launches `claude --dangerously-skip-permissions` inside a
+strictly isolated sandbox containing **only** the selected project(s) and an
+explicit allowlist of paths — nothing else on the host is visible.
 
 Project files are assumed to already exist at the same path on both machines
 (e.g. synced with Syncthing); there is no sync layer.
@@ -18,11 +18,39 @@ Project files are assumed to already exist at the same path on both machines
 | Piece       | Runs on | Job                                                                  |
 | ----------- | ------- | -------------------------------------------------------------------- |
 | `horde`     | client  | Catalog projects, route the prompt, gate local/remote, hand off      |
-| `horde-run` | both    | Enter the project, force-enable the sandbox, launch the session      |
+| `horde-run` | both    | Build the isolation sandbox, inject secrets, launch the session      |
 
 The remote host never sees the router or any project-selection logic.  Its
 entire footprint is `horde-run` (which carries `claude-code`, `bubblewrap`,
 and `socat` with it), `tmux`, `sshd`, and the user-namespaces sysctl.
+
+## Isolation model
+
+Every session — local or remote — runs in two nested layers:
+
+1. **Outer namespace (horde-run's own bubblewrap).** A mount + PID + user
+   namespace whose filesystem is built from an explicit allowlist:
+   - `/nix/store` (read-only) and a minimal set of `/etc` files needed for
+     DNS and TLS;
+   - the selected project directory, and any `--add` projects (read-write);
+   - a private persistent HOME (`stateDir`) for Claude Code's own state;
+   - whatever you list in `exposeReadOnly` / `exposeReadWrite`.
+
+   Nothing else is mounted, so Claude — including its Read tool, which
+   `--dangerously-skip-permissions` would otherwise let read any file —
+   cannot see your home directory, `~/.ssh`, other projects, `/etc/shadow`,
+   or any host path you didn't list.  The environment is scrubbed to a
+   minimal allowlist plus the injected secrets, so no host variables leak
+   in.
+
+2. **Inner sandbox (Claude Code's native sandbox).** Kept enabled inside
+   the outer namespace as defense in depth: it confines the Bash tool and
+   routes its network through the hostname-filtering proxy.
+
+Secrets are never embedded in the image or the command line.  They are read
+from the token files you configure and injected as environment variables
+inside the sandbox (so they appear only in the process environment, not in
+`/proc/<pid>/cmdline`).
 
 ## Installation
 
@@ -40,6 +68,11 @@ Add the flake as an input and import the modules:
         enable = true;
         remote = "me@server.lan";   # omit to always run locally
       };
+      programs.horde.runner = {
+        # Secrets, deployed out-of-store via sops-nix/agenix:
+        claudeTokenFile = "/run/secrets/claude-token";
+        githubTokenFile = "/run/secrets/github-token";
+      };
     }
   ];
 
@@ -47,68 +80,71 @@ Add the flake as an input and import the modules:
   nixosConfigurations.server.modules = [
     inputs.horde.nixosModules.server
     {
-      programs.horde.server = {
-        enable = true;
-        apiKeyFile = "/run/secrets/anthropic-api-key";  # via sops-nix/agenix
+      programs.horde.server.enable = true;
+      programs.horde.runner = {
+        claudeTokenFile = "/run/secrets/claude-token";
+        githubTokenFile = "/run/secrets/github-token";
       };
     }
   ];
 }
 ```
 
-`nixosModules.default` imports both, for a machine that plays both roles
-(when both are enabled, the server module owns the shared runner settings).
-The packages are also exposed directly as `packages.<system>.horde` and
-`packages.<system>.horde-run`, and as overlays, if you'd rather wire things
-up yourself.  The flake instantiates its own nixpkgs with the `claude-code`
-unfree exception, so you don't need to touch your system's `allowUnfree`
-settings.
+Both modules import the shared `programs.horde.runner` options, which
+configure the sandbox and secrets on whichever machine actually runs
+sessions.  `nixosModules.default` imports both, for a machine that plays
+both roles.  The packages are also exposed directly as
+`packages.<system>.horde` and `packages.<system>.horde-run`, and as
+overlays, if you'd rather wire things up yourself.  The flake instantiates
+its own nixpkgs with the `claude-code` unfree exception, so you don't need
+to touch your system's `allowUnfree` settings.
+
+### Runner options
+
+All under `programs.horde.runner`:
+
+| Option            | Meaning                                                                 |
+| ----------------- | ----------------------------------------------------------------------- |
+| `projectsDir`     | Directory holding the projects (default `~/Projects`)                    |
+| `stateDir`        | Host dir backing the sandbox HOME (default `~/.local/share/horde/home`)  |
+| `claudeTokenFile` | File with a Claude credential (see below)                               |
+| `githubTokenFile` | File with a GitHub token; also wires gh as git's credential helper      |
+| `extraTokenFiles` | `{ VAR = "/path"; }` — other secrets, exported under the given names     |
+| `exposeReadOnly`  | Extra host paths mounted read-only in the sandbox                       |
+| `exposeReadWrite` | Extra host paths mounted read-write in the sandbox                      |
+| `packages`        | Tools available on PATH inside the sandbox (sensible default set)        |
+| `allowNix`        | Expose the nix daemon socket so sessions can build (default `false`)     |
+| `claudeSettings`  | Override the inner native-sandbox `--settings` (e.g. egress allowlist)   |
 
 ### Authentication
 
-- **Local**: log in to Claude Code normally (`claude` → `/login`); horde
-  uses the same credentials.  Alternatively set
-  `programs.horde.client.apiKeyFile`.
-- **Remote**: set `programs.horde.server.apiKeyFile` to a path containing an
-  API key.  Keep the key out of the nix store — deploy it with sops-nix or
-  agenix and point the option at the decrypted path (mode `0600`).
+Provide credentials as files (deploy them out of the nix store with
+sops-nix/agenix, mode `0600`); nothing needs an interactive login per
+session.
 
-### Third-party services (GitHub, etc.)
+- **Claude** — `claudeTokenFile`.  Run `claude setup-token` once to mint a
+  long-lived OAuth token (starts with `sk-ant-oat`); horde exports it as
+  `CLAUDE_CODE_OAUTH_TOKEN`.  Any other value is treated as an API key and
+  exported as `ANTHROPIC_API_KEY`.
+- **GitHub** — `githubTokenFile`, ideally a fine-grained, repo-scoped PAT.
+  horde exports it as `GH_TOKEN`/`GITHUB_TOKEN` and configures gh as git's
+  HTTPS credential helper in the sandbox HOME, so `git push`, `gh pr
+  create`, etc. work with no per-session auth.
+- **Anything else** — `extraTokenFiles`, e.g.
+  `{ CACHIX_AUTH_TOKEN = "/run/secrets/cachix"; }`.
 
-Sessions inherit the worker's file-based credentials: the sandbox allows
-filesystem **reads** everywhere by default, so tokens written by a one-time
-login (`~/.config/gh`, `~/.netrc`, `~/.git-credentials`, …) are visible to
-every session with no further prompts.
+Because the token files are the *only* credentials mounted, this is a strict
+allowlist: a service is reachable iff you gave horde its token.  No host
+credential store (`~/.ssh`, `~/.config/gh`, `~/.netrc`) is visible to the
+agent at all.
 
-One-time GitHub setup per worker:
-
-```bash
-gh auth login        # device flow, works over SSH; or paste a fine-grained PAT
-gh auth setup-git    # makes gh the git credential helper for HTTPS remotes
-```
-
-(Have `gh`/`git` on the worker's PATH for sandbox sessions — via the
-project's dev shell or `environment.systemPackages`.)
-
-Caveats:
-
-- **Use HTTPS remotes inside workers, not SSH.**  Sandboxed network traffic
-  goes through a hostname-based HTTP(S) proxy; git-over-SSH (port 22)
-  doesn't pass through it.  HTTPS+token is also the safer choice: a
-  bypass-permissions agent can read anything readable, so prefer
-  fine-grained, repo-scoped PATs over your real SSH keys.
-- Writes outside the project are denied by default.  Reading stored tokens
-  is unaffected, but if a service's CLI needs to update its own config
-  mid-session, allow it via `claudeSettings`, e.g.
-  `sandbox.filesystem.allowWrite = ["~/.config/gh"]`.
-- If you lock egress with `sandbox.network.allowedDomains`, include each
-  service's domains — GitHub needs `github.com`, `api.github.com`,
-  `codeload.github.com`, and `objects.githubusercontent.com`.
-
-The same pattern works for any service whose CLI caches a token in a file
-after a one-time login.  Conversely, remember the flip side: every credential
-file on the worker is readable by the agent, so keep secrets you *don't*
-want exposed off the worker (or add them to `sandbox.filesystem.denyRead`).
+Caveat: **use HTTPS git remotes inside workers, not SSH.**  Sandboxed
+network traffic goes through a hostname-based HTTP(S) proxy; git-over-SSH
+(port 22) doesn't pass through it.  HTTPS+token (configured above) is also
+the safer choice given the bypass-permissions agent.  If you lock egress
+with `claudeSettings.sandbox.network.allowedDomains`, include each service's
+domains — GitHub needs `github.com`, `api.github.com`, `codeload.github.com`,
+and `objects.githubusercontent.com`.
 
 ## Usage
 
@@ -150,46 +186,54 @@ the latency probe read near-zero, biasing toward remote.
 
 ### Environment variables
 
-| Variable                | Default            | Meaning                                  |
-| ----------------------- | ------------------ | ---------------------------------------- |
-| `HORDE_PROJECTS`        | `~/Projects`       | Directory containing projects            |
-| `HORDE_REMOTE`          | _(unset = local)_  | SSH destination of the remote host       |
-| `HORDE_LATENCY_MS`      | `150`              | Max RTT before falling back to local     |
-| `HORDE_CONNECT_TIMEOUT` | `2`                | Reachability probe timeout (seconds)     |
-| `HORDE_ROUTER_MODEL`    | `claude-haiku-4-5` | Model for the routing call               |
-| `HORDE_API_KEY_FILE`    | _(unset)_          | File exported as `ANTHROPIC_API_KEY`     |
-| `HORDE_CLAUDE_SETTINGS` | _(built-in)_       | JSON/path overriding the sandbox settings |
-
-The NixOS modules set these system-wide from their options.
+The router (`horde`) reads `HORDE_REMOTE`, `HORDE_LATENCY_MS` (default 150),
+`HORDE_CONNECT_TIMEOUT` (default 2), and `HORDE_ROUTER_MODEL` (default
+`claude-haiku-4-5`).  The runner (`horde-run`) reads `HORDE_PROJECTS`,
+`HORDE_STATE_DIR`, the token-file and expose-path variables, and
+`HORDE_CLAUDE_SETTINGS`.  The NixOS modules set all of these from their
+options; run `horde-run --help` for the full list if invoking it directly.
 
 ## Security model
 
-`--dangerously-skip-permissions` removes per-action review, so the sandbox
-is the only perimeter.  horde-run therefore passes strict settings on every
-launch:
+`--dangerously-skip-permissions` removes Claude Code's own per-action
+review, so isolation is the only perimeter — and horde makes that perimeter
+the OS, not Claude's settings.
 
-```json
-{"sandbox": {"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false}}
-```
+- **Outer bubblewrap namespace** is the real boundary: an explicit mount
+  allowlist (project(s), `/nix/store`, private HOME, your `expose*` paths,
+  minimal `/etc`).  Anything not listed — your home, `~/.ssh`, other
+  projects, `/etc/shadow` — does not exist inside the sandbox, so even a
+  fully compromised agent reading via any tool cannot reach it.  The
+  environment is scrubbed to an allowlist, and secrets are passed via the
+  environment (not argv).
+- **Inner native sandbox** adds defense in depth, launched with:
 
-- `failIfUnavailable` makes a missing sandbox a hard error rather than a
-  silent fallback to unsandboxed execution.
-- `allowUnsandboxedCommands: false` disables the escape hatch that retries
-  failed commands outside the sandbox.
-- Filesystem writes are confined to the project (plus `--add-dir` extras);
-  network egress goes through the sandbox proxy.  To lock egress to an
-  allowlist, set `claudeSettings` (client and/or server module) with
-  `sandbox.network.allowedDomains` — e.g. GitHub, npm, and the Claude API.
-- The sandbox protects the host from the agent, not from the invoking user.
+  ```json
+  {"sandbox": {"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false}}
+  ```
+
+  `failIfUnavailable` turns a missing sandbox into a hard error rather than
+  silent unsandboxed execution; `allowUnsandboxedCommands: false` disables
+  the retry-outside-the-sandbox escape hatch.  Override with
+  `programs.horde.runner.claudeSettings` (e.g. to add
+  `sandbox.network.allowedDomains`).
 
 Worth knowing:
 
-- An exfiltration-capable agent can still read anything inside the sandbox,
-  so don't `--add-dir` directories containing secrets, and prefer
-  short-lived repo-scoped tokens inside projects.
-- To prevent a stray bare-host `claude --dangerously-skip-permissions`
-  outside horde, set `permissions.disableBypassPermissionsMode = "disable"`
-  in managed settings — horde-run's `--settings` perimeter is unaffected.
+- The boundary is still a shared kernel: it requires unprivileged user
+  namespaces, and a kernel exploit escapes it.  For untrusted *inputs*
+  (reviewing strangers' code, fetching arbitrary deps), step up to a VM —
+  e.g. run the worker under `microvm.nix`; horde's design is unchanged, only
+  what's underneath it.
+- Egress is the residual exfiltration channel: even with an allowlist, an
+  allowed domain like `github.com` is itself a usable channel, so prefer
+  fine-grained, repo-scoped tokens.
+- The optional seccomp filter that blocks Unix-domain sockets is not wired
+  in (it ships as a global npm package, which fights NixOS); reachable
+  sockets you expose (e.g. `allowNix`'s nix daemon) are outside the proxy.
+- To stop a stray bare-host `claude --dangerously-skip-permissions` outside
+  horde, set `permissions.disableBypassPermissionsMode = "disable"` in
+  managed settings — horde-run's perimeter is unaffected.
 
 ## Syncthing caveats
 
