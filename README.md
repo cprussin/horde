@@ -54,50 +54,60 @@ inside the sandbox (so they appear only in the process environment, not in
 
 ## Installation
 
-Add the flake as an input and import the modules:
+horde splits across two modules by what each setting actually requires:
+
+- a single **NixOS module** (`nixosModules.default`) for the only
+  system-level needs — the unprivileged user-namespaces sysctl bubblewrap
+  depends on, and (for a server) sshd;
+- a **home-manager module** (`homeManagerModules.default`, also exported as
+  `homeModules.default`) for everything user-space — the packages and all
+  configuration.
+
+Enable a role with `programs.horde.client.enable` / `.server.enable` in the
+NixOS module, and configure that role under the same option names in
+home-manager.
 
 ```nix
+# NixOS config — system-level requirements only:
 {
-  inputs.horde.url = "github:cprussin/horde";
-
-  # Local machine (the one you type on):
-  nixosConfigurations.laptop.modules = [
-    inputs.horde.nixosModules.client
-    {
-      programs.horde.client = {
-        enable = true;
-        remote = "me@server.lan";   # omit to always run locally
-      };
-      programs.horde.runner = {
-        # Secrets, deployed out-of-store via sops-nix/agenix:
-        claudeTokenFile = "/run/secrets/claude-token";
-        githubTokenFile = "/run/secrets/github-token";
-      };
-    }
-  ];
-
-  # Remote execution host:
-  nixosConfigurations.server.modules = [
-    inputs.horde.nixosModules.server
-    {
-      programs.horde.server.enable = true;
-      programs.horde.runner = {
-        claudeTokenFile = "/run/secrets/claude-token";
-        githubTokenFile = "/run/secrets/github-token";
-      };
-    }
-  ];
+  imports = [ inputs.horde.nixosModules.default ];
+  programs.horde.client.enable = true;   # laptop; use .server.enable on the server
 }
 ```
 
-Both modules import the shared `programs.horde.runner` options, which
-configure the sandbox and secrets on whichever machine actually runs
-sessions.  `nixosModules.default` imports both, for a machine that plays
-both roles.  The packages are also exposed directly as
-`packages.<system>.horde` and `packages.<system>.horde-run`, and as
-overlays, if you'd rather wire things up yourself.  The flake instantiates
-its own nixpkgs with the `claude-code` unfree exception, so you don't need
-to touch your system's `allowUnfree` settings.
+```nix
+# home-manager config — packages, router, sandbox, and secrets:
+{
+  imports = [ inputs.horde.homeManagerModules.default ];
+
+  programs.horde.client = {
+    enable = true;
+    remote = "me@server.lan";            # omit to always run locally
+  };
+  programs.horde.runner = {
+    # Secrets, deployed out-of-store via sops-nix/agenix:
+    claudeTokenFile = "/run/secrets/claude-token";
+    githubTokenFile = "/run/secrets/github-token";
+  };
+}
+```
+
+On the server, set `programs.horde.server.enable = true` in both modules
+instead, and give the home-manager `programs.horde.runner` the same secret
+files.  A machine that plays both roles enables both.
+
+The `programs.horde.runner` options (the sandbox and secrets) apply on
+whichever machine actually runs sessions — the client for local runs, the
+server for remote ones.  Because the configuration lives in home-manager
+session variables, the remote handoff runs through a login shell so they
+load; this assumes home-manager manages the worker user's shell (the usual
+setup).
+
+The packages are also exposed directly as `packages.<system>.horde` and
+`packages.<system>.horde-run`, and as overlays, if you'd rather wire things
+up yourself.  The flake instantiates its own nixpkgs with the `claude-code`
+unfree exception, so you don't need to touch your system's `allowUnfree`
+settings.
 
 ### Runner options
 
@@ -190,7 +200,7 @@ The router (`horde`) reads `HORDE_REMOTE`, `HORDE_LATENCY_MS` (default 150),
 `HORDE_CONNECT_TIMEOUT` (default 2), and `HORDE_ROUTER_MODEL` (default
 `claude-haiku-4-5`).  The runner (`horde-run`) reads `HORDE_PROJECTS`,
 `HORDE_STATE_DIR`, the token-file and expose-path variables, and
-`HORDE_CLAUDE_SETTINGS`.  The NixOS modules set all of these from their
+`HORDE_CLAUDE_SETTINGS`.  The home-manager module sets all of these from its
 options; run `horde-run --help` for the full list if invoking it directly.
 
 ## Security model

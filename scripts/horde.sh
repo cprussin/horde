@@ -262,9 +262,17 @@ for arg in "${runner_args[@]}"; do
   runner_str+=" $(printf '%q' "$arg")"
 done
 session="horde-$primary"
+
+# The runner's PATH and HORDE_* config come from the user's home-manager
+# session variables, which are only loaded by a login shell — so run
+# horde-run through `bash -lc`.  A second login shell wraps the whole tmux
+# invocation so tmux itself is found on PATH, and the inner one re-applies
+# the environment regardless of any already-running tmux server's env.
+inner_login="bash -lc $(printf '%q' "$runner_str")"
 # tmux -A attaches if the session already exists, so a dropped connection
 # is recoverable by re-running the same command.
-remote_cmd="tmux new-session -A -s $(printf '%q' "$session") $(printf '%q' "$runner_str")"
+tmux_cmd="tmux new-session -A -s $(printf '%q' "$session") $(printf '%q' "$inner_login")"
+remote_cmd="bash -lc $(printf '%q' "$tmux_cmd")"
 
 if [ "$dry_run" -eq 1 ]; then
   echo "projects: ${selected[*]}"

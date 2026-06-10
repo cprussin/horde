@@ -96,34 +96,21 @@
     // {
       inherit overlays;
 
-      nixosModules = let
-        client = {
-          lib,
-          pkgs,
-          ...
-        }: {
-          imports = [./nix/modules/client.nix];
-          programs.horde.client.package =
-            lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde;
-          # Priority 1001 (one below mkDefault) so this never conflicts with
-          # the server wrapper's mkDefault when both modules are imported.
-          programs.horde.runner.package =
-            lib.mkOverride 1001 self.packages.${pkgs.stdenv.hostPlatform.system}.horde-run;
-        };
-        server = {
-          lib,
-          pkgs,
-          ...
-        }: {
-          imports = [./nix/modules/server.nix];
-          programs.horde.runner.package =
-            lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde-run;
-        };
-      in {
-        inherit client server;
-        default = {
-          imports = [client server];
-        };
+      nixosModules.default = ./nix/modules/nixos.nix;
+
+      homeManagerModules.default = {
+        lib,
+        pkgs,
+        ...
+      }: {
+        imports = [./nix/modules/home-manager.nix];
+        programs.horde.client.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde;
+        programs.horde.runner.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde-run;
       };
+
+      # home-manager renamed homeManagerModules to homeModules; expose both.
+      homeModules = self.homeManagerModules;
     };
 }
