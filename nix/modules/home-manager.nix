@@ -13,7 +13,9 @@
 
   sandbox-env = pkgs.buildEnv {
     name = "horde-sandbox-env";
-    paths = cfg.runner.packages;
+    # nix is only useful inside the sandbox when the daemon socket is
+    # exposed (allowNix), so it rides along only then.
+    paths = cfg.runner.packages ++ lib.optional cfg.runner.allowNix pkgs.nix;
   };
 
   env-var = name: value:
@@ -182,10 +184,13 @@ in {
         type = lib.types.bool;
         default = false;
         description = ''
-          Expose the nix daemon socket inside the sandbox so sessions can
-          run nix builds and dev shells.  This lets the agent realize
-          arbitrary store paths and consume build resources, so it is off by
-          default.
+          Let sessions use nix inside the sandbox — needed for `nix develop`
+          / direnv, including on worktrees created mid-session.  Exposes the
+          nix daemon socket and /etc/nix, adds nix to the sandbox PATH, and
+          forces the daemon store (NIX_REMOTE=daemon) so builds and
+          substitutions go to the real store rather than a private chroot
+          store.  This lets the agent realize arbitrary store paths and
+          consume build resources via the daemon, so it is off by default.
         '';
       };
 

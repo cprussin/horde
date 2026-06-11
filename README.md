@@ -123,8 +123,31 @@ All under `programs.horde.runner`:
 | `exposeReadOnly`  | Extra host paths mounted read-only in the sandbox                       |
 | `exposeReadWrite` | Extra host paths mounted read-write in the sandbox                      |
 | `packages`        | Tools available on PATH inside the sandbox (sensible default set)        |
-| `allowNix`        | Expose the nix daemon socket so sessions can build (default `false`)     |
+| `allowNix`        | Let sessions use nix (`nix develop`/direnv) inside the sandbox (default `false`) |
 | `claudeSettings`  | Override the inner native-sandbox `--settings` (e.g. egress allowlist)   |
+
+### Nix dev shells inside the sandbox
+
+A common project layout has Claude create a git worktree mid-session and
+only *then* enter a per-repo `nix develop` shell — so the dev environment
+can't be resolved up front, it has to work from inside the sandbox.
+
+Set `programs.horde.runner.allowNix = true` and it does.  The sandbox's
+`/nix/store` is read-only (as on any system — only the daemon writes to it),
+so horde exposes the nix daemon socket and `/etc/nix`, puts `nix` on the
+sandbox PATH, and sets `NIX_REMOTE=daemon`.  That last part matters: inside
+a user namespace with a read-only store, nix's `auto` store otherwise builds
+a throwaway private store under HOME and refetches the whole closure;
+forcing the daemon makes builds and substitutions land in the real store,
+which then show up live through the read-only bind mount.  Worktrees,
+`nix develop`, and direnv all work, because the project (including `.git`)
+is mounted read-write.
+
+The cost is that the session can drive the daemon to realize arbitrary store
+paths and consume build resources — hence it is opt-in.  If you also lock
+egress with `claudeSettings`, allow the substituter/cache domains nix needs
+(`cache.nixos.org`, `*.cachix.org`, and `github.com` / `api.github.com` for
+flake inputs).
 
 ### Authentication
 

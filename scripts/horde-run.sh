@@ -267,6 +267,13 @@ case "$cfg_allow_nix" in
     if [ -e /etc/nix ]; then
       bwrap_args+=(--ro-bind /etc/nix /etc/nix)
     fi
+    # Force the daemon store.  Inside a user namespace with a read-only
+    # /nix/store, nix's `auto` store otherwise spins up a private chroot
+    # store under HOME and re-fetches the whole closure.  With the daemon,
+    # builds and substitutions land in the real store and become visible
+    # through the live /nix/store bind mount.  (nix is added to the sandbox
+    # PATH by the home-manager module when allowNix is set.)
+    bwrap_args+=(--setenv NIX_REMOTE daemon)
     ;;
 esac
 
