@@ -160,7 +160,10 @@ session.
 - **Claude** — `claudeTokenFile`.  Run `claude setup-token` once to mint a
   long-lived OAuth token (starts with `sk-ant-oat`); horde exports it as
   `CLAUDE_CODE_OAUTH_TOKEN`.  Any other value is treated as an API key and
-  exported as `ANTHROPIC_API_KEY`.
+  exported as `ANTHROPIC_API_KEY`.  This authenticates both the sandboxed
+  session and the router's project-selection call, so a headless host needs
+  no `claude` login (an explicit Claude token already in the environment
+  still takes precedence for the router).
 - **GitHub** — either a **GitHub App** (`githubApp`, recommended once you
   span more than a couple of orgs) or per-owner **PATs** (`githubTokenFiles`),
   or both.  See [Multiple GitHub organizations](#multiple-github-organizations).

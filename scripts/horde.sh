@@ -36,6 +36,9 @@ Environment:
                          (default: 2)
   HORDE_ROUTER_MODEL     Model for the routing call
                          (default: claude-haiku-4-5)
+  HORDE_CLAUDE_TOKEN_FILE  File with a Claude credential, used to
+                         authenticate the routing call when no Claude token
+                         is already in the environment
 EOF
 }
 
@@ -88,6 +91,25 @@ remote="${HORDE_REMOTE:-}"
 latency_ms="${HORDE_LATENCY_MS:-150}"
 connect_timeout="${HORDE_CONNECT_TIMEOUT:-2}"
 router_model="${HORDE_ROUTER_MODEL:-claude-haiku-4-5}"
+claude_token_file="${HORDE_CLAUDE_TOKEN_FILE:-}"
+
+# The routing call runs outside the sandbox, so unlike the runner it has no
+# token injected.  Authenticate it from the same configured token file, so a
+# headless host needs no ambient Claude login.  An explicit token in the
+# environment still wins.
+authenticate_router() {
+  [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || return 0
+  [ -z "${ANTHROPIC_API_KEY:-}" ] || return 0
+  [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || return 0
+  [ -n "$claude_token_file" ] || return 0
+  [ -r "$claude_token_file" ] || die "cannot read claude token file: $claude_token_file"
+  local token
+  token="$(cat "$claude_token_file")"
+  case "$token" in
+    sk-ant-oat*) export CLAUDE_CODE_OAUTH_TOKEN="$token" ;;
+    *) export ANTHROPIC_API_KEY="$token" ;;
+  esac
+}
 
 projects_arg=""
 force_host=""
@@ -182,8 +204,17 @@ Respond with ONLY a JSON array of the project directory names the request \
 refers to, most relevant first, e.g. [\"foo\"] or [\"api\",\"worker\"].  Use \
 the names exactly as listed.  If nothing matches, respond with []."
 
-  router_output="$(claude --print --output-format json --model "$router_model" "$routing_prompt")" \
-    || die "routing call failed"
+  authenticate_router
+  # Keep stdout (the JSON) clean but capture stderr separately, so a failure
+  # (auth, model, network) is shown rather than swallowed by the command
+  # substitution.
+  router_err="$(mktemp)"
+  if ! router_output="$(claude --print --output-format json --model "$router_model" "$routing_prompt" 2> "$router_err")"; then
+    router_msg="$(cat "$router_err")"
+    rm -f "$router_err"
+    die "routing call failed:"$'\n'"${router_msg:-$router_output}"
+  fi
+  rm -f "$router_err"
   router_text="$(jq -r '.result // empty' <<< "$router_output")"
   array_json="$(grep -o '\[.*\]' <<< "$router_text" | head -n 1 || true)"
   [ -n "$array_json" ] || die "router did not return a project list: $router_text"
