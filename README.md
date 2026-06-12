@@ -119,7 +119,8 @@ All under `programs.horde.runner`:
 | `projectsDir`     | Directory holding the projects (default `~/Projects`)                    |
 | `stateDir`        | Host dir backing the sandbox HOME (default `~/.local/share/horde/home`)  |
 | `claudeTokenFile` | File with a Claude credential (see below)                               |
-| `githubTokenFiles`| GitHub tokens keyed by owner; `default` is the fallback (see below)      |
+| `githubTokenFiles`| GitHub PATs keyed by owner; `default` is the fallback (see below)        |
+| `githubApp`       | GitHub App (`appId` + `privateKeyFile`); mints per-org tokens on demand  |
 | `extraTokenFiles` | `{ VAR = "/path"; }` — other secrets, exported under the given names     |
 | `exposeReadOnly`  | Extra host paths mounted read-only in the sandbox                       |
 | `exposeReadWrite` | Extra host paths mounted read-write in the sandbox                      |
@@ -160,13 +161,10 @@ session.
   long-lived OAuth token (starts with `sk-ant-oat`); horde exports it as
   `CLAUDE_CODE_OAUTH_TOKEN`.  Any other value is treated as an API key and
   exported as `ANTHROPIC_API_KEY`.
-- **GitHub** — `githubTokenFiles`, an attrset keyed by owner (org or user
-  login).  The `default` key is the host-level fallback (also exported as
-  `GH_TOKEN`/`GITHUB_TOKEN`); a single token can just be
-  `githubTokenFiles.default = …`.  See [Multiple GitHub
-  organizations](#multiple-github-organizations) for per-org tokens.  Use
-  fine-grained, repo-scoped PATs.  git push/pull and `gh` work with no
-  per-session auth.
+- **GitHub** — either a **GitHub App** (`githubApp`, recommended once you
+  span more than a couple of orgs) or per-owner **PATs** (`githubTokenFiles`),
+  or both.  See [Multiple GitHub organizations](#multiple-github-organizations).
+  git push/pull and `gh` work with no per-session auth.
 - **Anything else** — `extraTokenFiles`, e.g.
   `{ CACHIX_AUTH_TOKEN = "/run/secrets/cachix"; }`.
 
@@ -185,9 +183,36 @@ and `objects.githubusercontent.com`.
 
 ### Multiple GitHub organizations
 
-When your projects span several orgs and you want a separately-scoped
-fine-grained PAT per org (the least-privilege model — fine-grained PATs are
-already scoped to one org's resources), give each owner its own token file:
+Projects spanning several orgs need a separately-scoped credential per org
+(fine-grained PATs and GitHub Apps are both scoped to a single org's
+resources).  horde supports two mechanisms, which can be combined.
+
+#### GitHub App (recommended)
+
+A GitHub App replaces N expiring PATs with **one** durable secret (the App
+private key).  Permissions are defined once on the App; per-use it mints a
+short-lived (1 h) installation token scoped to the requested org, so there's
+nothing to rotate, and adding an org is just installing the App on it — no
+horde config change.
+
+```nix
+programs.horde.runner.githubApp = {
+  appId          = 123456;
+  privateKeyFile = "/run/secrets/github-app-key.pem";   # sops-nix/agenix
+};
+```
+
+Setup: create a GitHub App (Settings → Developer settings → GitHub Apps),
+give it the repository permissions your agents need (Contents + Pull requests
++ Metadata is a sensible base), generate a private key, and install it on
+each org.  horde wires a git credential helper that, on demand, signs an App
+JWT and exchanges it for an installation token for the repo's owner (cached
+in tmpfs for the token's lifetime).  If the App isn't installed for an owner,
+the helper falls through to whatever you configured below.
+
+#### Per-owner PATs
+
+Give each owner its own fine-grained, repo-scoped token file:
 
 ```nix
 programs.horde.runner.githubTokenFiles = {
@@ -197,14 +222,19 @@ programs.horde.runner.githubTokenFiles = {
 };
 ```
 
-horde binds each token to `https://github.com/<owner>` in a generated git
-credential config (using git's `useHttpPath`), so the agent automatically
-uses the right token per repo — `acme-corp/*` gets the acme token,
-`side-org/*` gets the side token, anything else gets `default`.  The tokens
-live only in the environment, never in the on-disk gitconfig.  Because `gh`
-takes a single token per host rather than per path, when more than one owner
-is configured horde also installs a `gh` wrapper that selects the matching
-token from the current repo's `origin` owner before delegating to `gh`.
+Each token is bound to `https://github.com/<owner>` in a generated git
+credential config (via git's `useHttpPath`); tokens live only in the
+environment, never in the on-disk gitconfig.
+
+#### How they combine
+
+git tries credentials most-specific-first: a per-owner PAT, then the App
+(for any owner it's installed on), then `githubTokenFiles.default`.  So you
+can run the App for most orgs and still pin a specific PAT for one owner, or
+keep a default PAT as the catch-all.  Because `gh` takes a single token per
+host rather than per path, whenever credentials vary by owner horde also
+installs a `gh` wrapper that resolves the current repo's credential through
+git (covering both PATs and minted App tokens) before delegating to `gh`.
 
 ## Usage
 

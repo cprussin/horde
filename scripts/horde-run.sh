@@ -36,6 +36,10 @@ Environment (normally set by the NixOS runner module):
                            key scopes its token to https://github.com/<owner>
                            via a generated git credential config, and a gh
                            wrapper picks the matching token by repo owner
+  HORDE_GH_APP_ID          GitHub App ID; with HORDE_GH_APP_KEY_FILE, mints
+                           installation tokens on demand per repo owner (a
+                           fallback for any owner the App is installed on)
+  HORDE_GH_APP_KEY_FILE    File with the GitHub App private key (PEM)
   HORDE_TOKEN_FILES        JSON object of VAR -> file for other services
   HORDE_RO_PATHS           JSON array of extra read-only paths to expose
   HORDE_RW_PATHS           JSON array of extra read-write paths to expose
@@ -58,6 +62,8 @@ state_dir="${HORDE_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/horde/home}"
 cfg_sandbox_path="${HORDE_SANDBOX_PATH:-}"
 cfg_claude_token_file="${HORDE_CLAUDE_TOKEN_FILE:-}"
 cfg_github_token_files="${HORDE_GITHUB_TOKEN_FILES:-}"
+cfg_gh_app_id="${HORDE_GH_APP_ID:-}"
+cfg_gh_app_key_file="${HORDE_GH_APP_KEY_FILE:-}"
 cfg_token_files="${HORDE_TOKEN_FILES:-}"
 cfg_ro_paths="${HORDE_RO_PATHS:-}"
 cfg_rw_paths="${HORDE_RW_PATHS:-}"
@@ -184,6 +190,18 @@ if [ -n "$cfg_github_token_files" ]; then
   done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$cfg_github_token_files")
 fi
 
+# GitHub App: inject the App ID and private key so the credential helper can
+# mint installation tokens on demand, per repo owner.
+have_gh_app=0
+if [ -n "$cfg_gh_app_id" ] && [ -n "$cfg_gh_app_key_file" ]; then
+  [ -r "$cfg_gh_app_key_file" ] || die "cannot read github app key file: $cfg_gh_app_key_file"
+  HORDE_GH_APP_ID="$cfg_gh_app_id"
+  HORDE_GH_APP_KEY="$(cat "$cfg_gh_app_key_file")"
+  export HORDE_GH_APP_ID HORDE_GH_APP_KEY
+  keep_env+=(HORDE_GH_APP_ID HORDE_GH_APP_KEY)
+  have_gh_app=1
+fi
+
 if [ -n "$cfg_token_files" ]; then
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
@@ -229,15 +247,17 @@ mkdir -p "$state_dir"
 
 inner_path="${cfg_sandbox_path:+$cfg_sandbox_path:}$PATH"
 
-if [ -n "$cfg_github_token_files" ]; then
-  # A managed include file holds the credential helpers; the tokens
-  # themselves stay in the environment (referenced by name), never on disk.
-  # useHttpPath makes git send the repo path, so per-owner sections match;
-  # more specific owner sections are listed first because git tries helpers
-  # in order and takes the first that answers.
+# A managed include file holds the github credential helpers.  Helpers are
+# tried in config order and the first to answer wins, so they are emitted
+# most-specific-first: per-owner PATs, then the App (serves any installed
+# owner, emits nothing otherwise), then the default PAT catch-all.  PAT
+# values stay in the environment, referenced by name, never on disk.
+if [ -n "$cfg_github_token_files" ] || [ "$have_gh_app" -eq 1 ]; then
   gh_conf="$state_dir/horde-github.gitconfig"
   {
-    if [ ${#gh_owners[@]} -gt 0 ]; then
+    # useHttpPath makes git send the repo path, which the per-owner and App
+    # helpers need to know the owner.
+    if [ ${#gh_owners[@]} -gt 0 ] || [ "$have_gh_app" -eq 1 ]; then
       printf '[credential "https://github.com"]\n\tuseHttpPath = true\n'
     fi
     i=0
@@ -246,6 +266,10 @@ if [ -n "$cfg_github_token_files" ]; then
         "${gh_owners[$i]}" "${gh_owner_vars[$i]}"
       i=$((i + 1))
     done
+    if [ "$have_gh_app" -eq 1 ]; then
+      gh_app_helper="$(command -v horde-gh-app-credential)"
+      printf '[credential "https://github.com"]\n\thelper = "!%s"\n' "$gh_app_helper"
+    fi
     if [ "$have_gh_default" -eq 1 ]; then
       # The $GH_TOKEN is meant to stay literal — it is expanded by the helper
       # shell inside the sandbox, not here.
@@ -263,12 +287,13 @@ if [ -n "$cfg_github_token_files" ]; then
   fi
 fi
 
-# gh ignores git's per-path credentials, so when more than one owner token
-# exists, shadow gh with a wrapper that sets GH_TOKEN to match the current
-# repo's owner and then delegates to the real gh.  The wrapper removes its
-# own directory from PATH and re-resolves gh/git, so it stays transparent
-# to whichever gh the session is otherwise using.
-if [ ${#gh_owners[@]} -gt 0 ]; then
+# gh takes a single token per host, ignoring git's per-path credentials, so
+# when tokens vary by owner (per-owner PATs or the App) shadow gh with a
+# wrapper that resolves the current repo's credential through git and sets
+# GH_TOKEN before delegating.  Using `git credential fill` means it handles
+# PATs and minted App tokens identically.  The wrapper strips its own
+# directory from PATH so git/gh resolve to the session's real binaries.
+if [ ${#gh_owners[@]} -gt 0 ] || [ "$have_gh_app" -eq 1 ]; then
   real_bash="$(command -v bash)"
   wrapper_dir="$sandbox_home/bin"
   mkdir -p "$state_dir/bin"
@@ -283,23 +308,23 @@ for d in \$PATH; do
 done
 unset IFS
 export PATH="\$new_path"
-owner="\$(git remote get-url origin 2>/dev/null || true)"
-case "\$owner" in
+remote="\$(git remote get-url origin 2>/dev/null || true)"
+case "\$remote" in
   *github.com[:/]*)
-    owner="\${owner##*github.com}"
-    owner="\${owner#[:/]}"
-    owner="\${owner%%/*}"
+    rest="\${remote##*github.com}"
+    rest="\${rest#[:/]}"
+    rest="\${rest%.git}"
+    owner="\${rest%%/*}"
+    repo="\${rest#*/}"
+    repo="\${repo%%/*}"
     ;;
-  *) owner="" ;;
+  *) owner=""; repo="" ;;
 esac
-case "\$owner" in
-  *[!A-Za-z0-9-]* | "" | -*) owner="" ;;
-esac
-if [ -n "\$owner" ]; then
-  var="HORDE_GH_TOKEN_\${owner//-/_}"
-  if [ -n "\${!var:-}" ]; then
-    GH_TOKEN="\${!var}"
-    GITHUB_TOKEN="\${!var}"
+if [ -n "\$owner" ] && [ -n "\$repo" ]; then
+  token="\$(printf 'protocol=https\nhost=github.com\npath=%s/%s\n\n' "\$owner" "\$repo" | git credential fill 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  if [ -n "\$token" ]; then
+    GH_TOKEN="\$token"
+    GITHUB_TOKEN="\$token"
     export GH_TOKEN GITHUB_TOKEN
   fi
 fi

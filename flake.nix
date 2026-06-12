@@ -75,7 +75,8 @@
     in {
       dev-cli = mkOverlay "dev-cli" dev-cli [mkCli.overlays.default];
       dev-shell = mkOverlay "dev-shell" dev-shell [overlays.dev-cli];
-      horde-run = mkOverlay "horde-run" ./nix/packages/horde-run.nix [];
+      horde-gh-app-credential = mkOverlay "horde-gh-app-credential" ./nix/packages/horde-gh-app-credential.nix [];
+      horde-run = mkOverlay "horde-run" ./nix/packages/horde-run.nix [overlays.horde-gh-app-credential];
       horde = mkOverlay "horde" ./nix/packages/horde.nix [overlays.horde-run];
     };
   in

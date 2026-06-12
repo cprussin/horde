@@ -132,6 +132,25 @@ in {
         '';
       };
 
+      githubApp = {
+        appId = lib.mkOption {
+          type = lib.types.nullOr (lib.types.either lib.types.int lib.types.str);
+          default = null;
+          example = 123456;
+          description = "GitHub App ID (from the App's settings page).";
+        };
+
+        privateKeyFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "/run/secrets/github-app-key.pem";
+          description = ''
+            File containing the GitHub App private key (PEM).  Keep it out of
+            the nix store — deploy with sops-nix/agenix.
+          '';
+        };
+      };
+
       extraTokenFiles = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
         default = {};
@@ -224,6 +243,14 @@ in {
   };
 
   config = lib.mkIf runner-active {
+    assertions = [
+      {
+        assertion =
+          (cfg.runner.githubApp.appId == null) == (cfg.runner.githubApp.privateKeyFile == null);
+        message = "programs.horde.runner.githubApp needs both appId and privateKeyFile, or neither.";
+      }
+    ];
+
     home.packages =
       lib.optional cfg.client.enable cfg.client.package
       ++ lib.optionals cfg.server.enable [
@@ -242,6 +269,10 @@ in {
       // env-var "HORDE_CLAUDE_TOKEN_FILE" cfg.runner.claudeTokenFile
       // lib.optionalAttrs (cfg.runner.githubTokenFiles != {}) {
         HORDE_GITHUB_TOKEN_FILES = builtins.toJSON cfg.runner.githubTokenFiles;
+      }
+      // lib.optionalAttrs (cfg.runner.githubApp.appId != null) {
+        HORDE_GH_APP_ID = toString cfg.runner.githubApp.appId;
+        HORDE_GH_APP_KEY_FILE = cfg.runner.githubApp.privateKeyFile;
       }
       // lib.optionalAttrs (cfg.runner.extraTokenFiles != {}) {
         HORDE_TOKEN_FILES = builtins.toJSON cfg.runner.extraTokenFiles;
