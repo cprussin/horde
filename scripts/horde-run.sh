@@ -30,9 +30,12 @@ Environment (normally set by the NixOS runner module):
   HORDE_CLAUDE_TOKEN_FILE  File with a Claude credential; exported as
                            CLAUDE_CODE_OAUTH_TOKEN (sk-ant-oat...) or
                            ANTHROPIC_API_KEY (anything else)
-  HORDE_GITHUB_TOKEN_FILE  File with a GitHub token; exported as
-                           GH_TOKEN/GITHUB_TOKEN, and gh is wired up as
-                           git's credential helper for github.com
+  HORDE_GITHUB_TOKEN_FILES JSON object of GitHub owner -> token file.  The
+                           "default" key is the host-level fallback (also
+                           exported as GH_TOKEN/GITHUB_TOKEN); every other
+                           key scopes its token to https://github.com/<owner>
+                           via a generated git credential config, and a gh
+                           wrapper picks the matching token by repo owner
   HORDE_TOKEN_FILES        JSON object of VAR -> file for other services
   HORDE_RO_PATHS           JSON array of extra read-only paths to expose
   HORDE_RW_PATHS           JSON array of extra read-write paths to expose
@@ -54,7 +57,7 @@ projects_dir="${HORDE_PROJECTS:-$HOME/Projects}"
 state_dir="${HORDE_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/horde/home}"
 cfg_sandbox_path="${HORDE_SANDBOX_PATH:-}"
 cfg_claude_token_file="${HORDE_CLAUDE_TOKEN_FILE:-}"
-cfg_github_token_file="${HORDE_GITHUB_TOKEN_FILE:-}"
+cfg_github_token_files="${HORDE_GITHUB_TOKEN_FILES:-}"
 cfg_token_files="${HORDE_TOKEN_FILES:-}"
 cfg_ro_paths="${HORDE_RO_PATHS:-}"
 cfg_rw_paths="${HORDE_RW_PATHS:-}"
@@ -145,12 +148,40 @@ if [ -n "$cfg_claude_token_file" ]; then
   esac
 fi
 
-if [ -n "$cfg_github_token_file" ]; then
-  [ -r "$cfg_github_token_file" ] || die "cannot read github token file: $cfg_github_token_file"
-  GH_TOKEN="$(cat "$cfg_github_token_file")"
-  GITHUB_TOKEN="$GH_TOKEN"
-  export GH_TOKEN GITHUB_TOKEN
-  keep_env+=(GH_TOKEN GITHUB_TOKEN)
+# GitHub tokens, one per owner.  The "default" key becomes the host-level
+# GH_TOKEN; every other owner's token is injected as HORDE_GH_TOKEN_<owner>
+# and bound to that owner's repos via the git credential config below.
+gh_owners=()
+gh_owner_vars=()
+have_gh_default=0
+if [ -n "$cfg_github_token_files" ]; then
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    owner="${entry%%=*}"
+    file="${entry#*=}"
+    [ -r "$file" ] || die "cannot read github token file: $file"
+    token="$(cat "$file")"
+    if [ "$owner" = default ]; then
+      GH_TOKEN="$token"
+      GITHUB_TOKEN="$token"
+      export GH_TOKEN GITHUB_TOKEN
+      keep_env+=(GH_TOKEN GITHUB_TOKEN)
+      have_gh_default=1
+    else
+      case "$owner" in
+        *[!A-Za-z0-9-]* | "" | -*)
+          die "invalid github owner in HORDE_GITHUB_TOKEN_FILES: $owner"
+          ;;
+      esac
+      # GitHub logins contain no underscores, so hyphen->underscore yields a
+      # unique, valid environment-variable name.
+      var="HORDE_GH_TOKEN_${owner//-/_}"
+      export "$var=$token"
+      keep_env+=("$var")
+      gh_owners+=("$owner")
+      gh_owner_vars+=("$var")
+    fi
+  done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$cfg_github_token_files")
 fi
 
 if [ -n "$cfg_token_files" ]; then
@@ -194,23 +225,91 @@ done < <(export -p | sed -n 's/^declare -x \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p')
 sandbox_home=/home/horde
 mkdir -p "$state_dir"
 
-# With a GitHub token present, wire gh up as git's credential helper once,
-# so HTTPS pushes work without any per-session auth.
-if [ -n "${GH_TOKEN:-}" ]; then
+# --- github credential config ---------------------------------------------
+
+inner_path="${cfg_sandbox_path:+$cfg_sandbox_path:}$PATH"
+
+if [ -n "$cfg_github_token_files" ]; then
+  # A managed include file holds the credential helpers; the tokens
+  # themselves stay in the environment (referenced by name), never on disk.
+  # useHttpPath makes git send the repo path, so per-owner sections match;
+  # more specific owner sections are listed first because git tries helpers
+  # in order and takes the first that answers.
+  gh_conf="$state_dir/horde-github.gitconfig"
+  {
+    if [ ${#gh_owners[@]} -gt 0 ]; then
+      printf '[credential "https://github.com"]\n\tuseHttpPath = true\n'
+    fi
+    i=0
+    while [ "$i" -lt ${#gh_owners[@]} ]; do
+      printf '[credential "https://github.com/%s"]\n\thelper = "!f() { echo username=x-access-token; echo \\"password=$%s\\"; }; f"\n' \
+        "${gh_owners[$i]}" "${gh_owner_vars[$i]}"
+      i=$((i + 1))
+    done
+    if [ "$have_gh_default" -eq 1 ]; then
+      # The $GH_TOKEN is meant to stay literal — it is expanded by the helper
+      # shell inside the sandbox, not here.
+      # shellcheck disable=SC2016
+      printf '[credential "https://github.com"]\n\thelper = "!f() { echo username=x-access-token; echo \\"password=$GH_TOKEN\\"; }; f"\n'
+      # shellcheck disable=SC2016
+      printf '[credential "https://gist.github.com"]\n\thelper = "!f() { echo username=x-access-token; echo \\"password=$GH_TOKEN\\"; }; f"\n'
+    fi
+  } > "$gh_conf"
+
   gitconfig="$state_dir/.gitconfig"
-  if ! grep -qs 'gh auth git-credential' "$gitconfig"; then
-    cat >> "$gitconfig" << 'EOF'
-[credential "https://github.com"]
-	helper = "!gh auth git-credential"
-[credential "https://gist.github.com"]
-	helper = "!gh auth git-credential"
-EOF
+  include_path="$sandbox_home/horde-github.gitconfig"
+  if ! grep -qsF "$include_path" "$gitconfig"; then
+    printf '[include]\n\tpath = %s\n' "$include_path" >> "$gitconfig"
   fi
 fi
 
-# --- assemble the sandbox --------------------------------------------------
+# gh ignores git's per-path credentials, so when more than one owner token
+# exists, shadow gh with a wrapper that sets GH_TOKEN to match the current
+# repo's owner and then delegates to the real gh.  The wrapper removes its
+# own directory from PATH and re-resolves gh/git, so it stays transparent
+# to whichever gh the session is otherwise using.
+if [ ${#gh_owners[@]} -gt 0 ]; then
+  real_bash="$(command -v bash)"
+  wrapper_dir="$sandbox_home/bin"
+  mkdir -p "$state_dir/bin"
+  cat > "$state_dir/bin/gh" << EOF
+#!$real_bash
+set -u
+new_path=""
+IFS=:
+for d in \$PATH; do
+  [ "\$d" = "$wrapper_dir" ] && continue
+  new_path="\${new_path:+\$new_path:}\$d"
+done
+unset IFS
+export PATH="\$new_path"
+owner="\$(git remote get-url origin 2>/dev/null || true)"
+case "\$owner" in
+  *github.com[:/]*)
+    owner="\${owner##*github.com}"
+    owner="\${owner#[:/]}"
+    owner="\${owner%%/*}"
+    ;;
+  *) owner="" ;;
+esac
+case "\$owner" in
+  *[!A-Za-z0-9-]* | "" | -*) owner="" ;;
+esac
+if [ -n "\$owner" ]; then
+  var="HORDE_GH_TOKEN_\${owner//-/_}"
+  if [ -n "\${!var:-}" ]; then
+    GH_TOKEN="\${!var}"
+    GITHUB_TOKEN="\${!var}"
+    export GH_TOKEN GITHUB_TOKEN
+  fi
+fi
+exec gh "\$@"
+EOF
+  chmod +x "$state_dir/bin/gh"
+  inner_path="$wrapper_dir:$inner_path"
+fi
 
-inner_path="${cfg_sandbox_path:+$cfg_sandbox_path:}$PATH"
+# --- assemble the sandbox --------------------------------------------------
 
 bwrap_args=(
   --die-with-parent

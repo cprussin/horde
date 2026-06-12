@@ -109,16 +109,26 @@ in {
         '';
       };
 
-      githubTokenFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        example = "/run/secrets/github-token";
+      githubTokenFiles = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = {};
+        example = {
+          default = "/run/secrets/github-default";
+          acme-corp = "/run/secrets/github-acme";
+          side-org = "/run/secrets/github-side";
+        };
         description = ''
-          File containing a GitHub token, exported inside the sandbox as
-          GH_TOKEN and GITHUB_TOKEN; gh is also wired up as git's credential
-          helper for github.com so HTTPS remotes work without further setup.
-          Prefer a fine-grained PAT scoped to the repos agents work on.
-          Keep it out of the nix store.
+          GitHub tokens, keyed by owner (organization or user login).  Each
+          token is bound to that owner's repos (https://github.com/<owner>)
+          via a generated git credential config, so the agent automatically
+          uses the right token per repo — letting you scope a separate
+          fine-grained PAT to each organization.  The special "default" key
+          is the host-level fallback for any other owner and is also exported
+          as GH_TOKEN/GITHUB_TOKEN.  When more than one owner is configured, a
+          gh wrapper selects the matching token by the current repo's owner.
+          Use HTTPS remotes inside the sandbox (git-over-SSH does not pass
+          through the native sandbox's proxy).  Keep the files out of the nix
+          store — deploy them with sops-nix/agenix.
         '';
       };
 
@@ -230,7 +240,9 @@ in {
       // env-var "HORDE_PROJECTS" cfg.runner.projectsDir
       // env-var "HORDE_STATE_DIR" cfg.runner.stateDir
       // env-var "HORDE_CLAUDE_TOKEN_FILE" cfg.runner.claudeTokenFile
-      // env-var "HORDE_GITHUB_TOKEN_FILE" cfg.runner.githubTokenFile
+      // lib.optionalAttrs (cfg.runner.githubTokenFiles != {}) {
+        HORDE_GITHUB_TOKEN_FILES = builtins.toJSON cfg.runner.githubTokenFiles;
+      }
       // lib.optionalAttrs (cfg.runner.extraTokenFiles != {}) {
         HORDE_TOKEN_FILES = builtins.toJSON cfg.runner.extraTokenFiles;
       }

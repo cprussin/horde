@@ -22,7 +22,8 @@ Project files are assumed to already exist at the same path on both machines
 
 The remote host never sees the router or any project-selection logic.  Its
 entire footprint is `horde-run` (which carries `claude-code`, `bubblewrap`,
-and `socat` with it), `tmux`, `sshd`, and the user-namespaces sysctl.
+and `socat` with it), `tmux`, the user-namespaces sysctl, and whatever SSH
+access you already have to it.
 
 ## Isolation model
 
@@ -56,27 +57,26 @@ inside the sandbox (so they appear only in the process environment, not in
 
 horde splits across two modules by what each setting actually requires:
 
-- a single **NixOS module** (`nixosModules.default`) for the only
-  system-level needs — the unprivileged user-namespaces sysctl bubblewrap
-  depends on, and (for a server) sshd;
+- a single **NixOS module** (`nixosModules.default`) for the only thing that
+  must be system-level: the unprivileged user-namespaces sysctl bubblewrap
+  depends on.  Enable it with `programs.horde.enable` on any machine that
+  runs sessions (client or server).  It does **not** force sshd — a remote
+  server is assumed to already have SSH (or another tunnel) set up.
 - a **home-manager module** (`homeManagerModules.default`, also exported as
   `homeModules.default`) for everything user-space — the packages and all
-  configuration.
-
-Enable a role with `programs.horde.client.enable` / `.server.enable` in the
-NixOS module, and configure that role under the same option names in
-home-manager.
+  configuration.  This is where you pick the role with
+  `programs.horde.client.enable` / `programs.horde.server.enable`.
 
 ```nix
-# NixOS config — system-level requirements only:
+# NixOS config — the one system requirement (client and server alike):
 {
   imports = [ inputs.horde.nixosModules.default ];
-  programs.horde.client.enable = true;   # laptop; use .server.enable on the server
+  programs.horde.enable = true;
 }
 ```
 
 ```nix
-# home-manager config — packages, router, sandbox, and secrets:
+# home-manager config — packages, role, router, sandbox, and secrets:
 {
   imports = [ inputs.horde.homeManagerModules.default ];
 
@@ -87,14 +87,15 @@ home-manager.
   programs.horde.runner = {
     # Secrets, deployed out-of-store via sops-nix/agenix:
     claudeTokenFile = "/run/secrets/claude-token";
-    githubTokenFile = "/run/secrets/github-token";
+    githubTokenFiles.default = "/run/secrets/github-token";
   };
 }
 ```
 
-On the server, set `programs.horde.server.enable = true` in both modules
-instead, and give the home-manager `programs.horde.runner` the same secret
-files.  A machine that plays both roles enables both.
+On the server, set `programs.horde.enable = true` (NixOS) and
+`programs.horde.server.enable = true` (home-manager), and give the
+home-manager `programs.horde.runner` the same secret files.  A machine that
+plays both roles enables both home-manager options.
 
 The `programs.horde.runner` options (the sandbox and secrets) apply on
 whichever machine actually runs sessions — the client for local runs, the
@@ -118,7 +119,7 @@ All under `programs.horde.runner`:
 | `projectsDir`     | Directory holding the projects (default `~/Projects`)                    |
 | `stateDir`        | Host dir backing the sandbox HOME (default `~/.local/share/horde/home`)  |
 | `claudeTokenFile` | File with a Claude credential (see below)                               |
-| `githubTokenFile` | File with a GitHub token; also wires gh as git's credential helper      |
+| `githubTokenFiles`| GitHub tokens keyed by owner; `default` is the fallback (see below)      |
 | `extraTokenFiles` | `{ VAR = "/path"; }` — other secrets, exported under the given names     |
 | `exposeReadOnly`  | Extra host paths mounted read-only in the sandbox                       |
 | `exposeReadWrite` | Extra host paths mounted read-write in the sandbox                      |
@@ -159,10 +160,13 @@ session.
   long-lived OAuth token (starts with `sk-ant-oat`); horde exports it as
   `CLAUDE_CODE_OAUTH_TOKEN`.  Any other value is treated as an API key and
   exported as `ANTHROPIC_API_KEY`.
-- **GitHub** — `githubTokenFile`, ideally a fine-grained, repo-scoped PAT.
-  horde exports it as `GH_TOKEN`/`GITHUB_TOKEN` and configures gh as git's
-  HTTPS credential helper in the sandbox HOME, so `git push`, `gh pr
-  create`, etc. work with no per-session auth.
+- **GitHub** — `githubTokenFiles`, an attrset keyed by owner (org or user
+  login).  The `default` key is the host-level fallback (also exported as
+  `GH_TOKEN`/`GITHUB_TOKEN`); a single token can just be
+  `githubTokenFiles.default = …`.  See [Multiple GitHub
+  organizations](#multiple-github-organizations) for per-org tokens.  Use
+  fine-grained, repo-scoped PATs.  git push/pull and `gh` work with no
+  per-session auth.
 - **Anything else** — `extraTokenFiles`, e.g.
   `{ CACHIX_AUTH_TOKEN = "/run/secrets/cachix"; }`.
 
@@ -178,6 +182,29 @@ the safer choice given the bypass-permissions agent.  If you lock egress
 with `claudeSettings.sandbox.network.allowedDomains`, include each service's
 domains — GitHub needs `github.com`, `api.github.com`, `codeload.github.com`,
 and `objects.githubusercontent.com`.
+
+### Multiple GitHub organizations
+
+When your projects span several orgs and you want a separately-scoped
+fine-grained PAT per org (the least-privilege model — fine-grained PATs are
+already scoped to one org's resources), give each owner its own token file:
+
+```nix
+programs.horde.runner.githubTokenFiles = {
+  default   = "/run/secrets/github-default";  # fallback for any other owner
+  acme-corp = "/run/secrets/github-acme";
+  side-org  = "/run/secrets/github-side";
+};
+```
+
+horde binds each token to `https://github.com/<owner>` in a generated git
+credential config (using git's `useHttpPath`), so the agent automatically
+uses the right token per repo — `acme-corp/*` gets the acme token,
+`side-org/*` gets the side token, anything else gets `default`.  The tokens
+live only in the environment, never in the on-disk gitconfig.  Because `gh`
+takes a single token per host rather than per path, when more than one owner
+is configured horde also installs a `gh` wrapper that selects the matching
+token from the current repo's `origin` owner before delegating to `gh`.
 
 ## Usage
 
