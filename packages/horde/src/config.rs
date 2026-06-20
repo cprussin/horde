@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub struct Config {
     pub projects_dir: PathBuf,
     pub remote: Option<String>,
+    /// Extra hosts the session switcher discovers sessions on (HORDE_REMOTES).
+    pub remotes: Vec<String>,
     pub latency_ms: u128,
     pub connect_timeout: u64,
     pub router_model: String,
@@ -46,14 +48,36 @@ impl Config {
             }
         };
 
+        let remotes = nonempty("HORDE_REMOTES")
+            .map(|s| {
+                s.split([',', ' '])
+                    .filter(|x| !x.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Config {
             projects_dir,
             remote: nonempty("HORDE_REMOTE"),
+            remotes,
             latency_ms,
             connect_timeout,
             router_model,
             claude_token_file: nonempty("HORDE_CLAUDE_TOKEN_FILE"),
             history_file,
         }
+    }
+
+    /// Hosts the switcher discovers sessions on: the primary remote plus
+    /// `remotes`, de-duplicated (local is always included separately).
+    pub fn discovery_remotes(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for host in self.remote.iter().chain(self.remotes.iter()) {
+            if !out.contains(host) {
+                out.push(host.clone());
+            }
+        }
+        out
     }
 }

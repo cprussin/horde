@@ -17,4 +17,6 @@ crossterm.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 tui-textarea.workspace = true
+tui-term.workspace = true
+vt100.workspace = true
 signal-hook.workspace = true

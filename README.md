@@ -20,10 +20,11 @@ Project files are assumed to already exist at the same path on both machines
 | `horde`        | client  | Catalog projects, route the prompt, gate local/remote, hand off   |
 | `horde-runner` | both    | Build the isolation sandbox, inject secrets, run/serve the session |
 
-Both are Rust programs (`horde` is a ratatui terminal UI for prompt entry).
-`horde-runner` has three modes: `run` (local — launch the sandbox in this
-terminal), and `serve`/`session` (remote — a persistent PTY session streamed
-back to the client).
+Both are Rust programs.  `horde` is a ratatui TUI: a session switcher that
+lists running sessions across hosts and renders the selected one's live
+terminal.  `horde-runner` provides `serve`/`session` (a persistent PTY session
+streamed to the client), `list` (enumerate live sessions for the switcher),
+and `run` (a direct local launch).
 
 The remote host never sees the router or any project-selection logic.  Its
 entire footprint is `horde-runner` (which carries `claude-code` and
@@ -92,6 +93,7 @@ horde splits across two modules by what each setting actually requires:
   programs.horde.client = {
     enable = true;
     remote = "me@server.lan";            # omit to always run locally
+    # remotes = [ "me@build-b.lan" ];    # extra hosts the switcher discovers
   };
   programs.horde.runner = {
     # Secrets, deployed out-of-store via sops-nix/agenix:
@@ -251,7 +253,7 @@ git (covering both PATs and minted App tokens) before delegating to `gh`.
 ## Usage
 
 ```bash
-horde                                 # opens an input box; type your prompt
+horde                                 # opens the session switcher
 horde "add retry logic to the upload client in my filesync project"
 horde --project api,worker "thread the new auth token through both services"
 horde --local "quick scratch edit in the blog project"
@@ -261,10 +263,27 @@ horde --dry-run "where would this go?"
 horde --project api "summarize TODOs" -- -p   # non-interactive print mode
 ```
 
-- Bare `horde` on a terminal opens a bordered, multi-line input box (vi-mode
-  editing, with persistent prompt history recalled by `↑`/`↓` or `^p`/`^n`),
-  then shows live `routing…` / `matched` / `host` status before handing off to
-  the session.
+### The session switcher
+
+Bare `horde` opens a Turborepo-style TUI: a **left sidebar** lists every
+running session — across local and each configured remote, tagged by host —
+and a **right pane** renders the selected session's live terminal.  Because
+sessions are owned by detached daemons, they survive the client: kill `horde`
+(or drop the SSH link) and the sessions keep running; relaunch `horde` and
+they're all there to switch between and resume.
+
+| Key            | Action                                                    |
+| -------------- | --------------------------------------------------------- |
+| `j`/`k`, `↑`/`↓` | Move the selection (the pane previews that session)     |
+| `↵`            | Focus the selected session — keystrokes go to it          |
+| `^B`           | Blur — return to the list (the session keeps running)     |
+| `n`            | New session — opens the prompt box, routes, and focuses it |
+| `q`            | Quit the switcher (sessions keep running)                 |
+
+The `n` prompt box has vi-mode editing and persistent history (`↑`/`↓` or
+`^p`/`^n`).  Passing a prompt or `--project` on the command line creates (or
+reattaches) that session and drops you straight into it.
+
 - `--project a,b,…` skips the router; the first project becomes the working
   directory and the rest are exposed via `--add-dir`.
 - With no `--project`, a headless call to `$HORDE_ROUTER_MODEL` (default
@@ -272,9 +291,10 @@ horde --project api "summarize TODOs" -- -p   # non-interactive print mode
   headers.
 - The session starts in the project root, so its `CLAUDE.md` is
   auto-discovered — no need to point at it explicitly.
-- Remote sessions are owned by a detached `horde-runner session` daemon, so
-  if the connection drops, re-running the same `horde` command reattaches
-  instead of starting over.
+- A new session goes local or to `remote` per the latency gate below; the
+  switcher *displays* sessions from local + `remote` + every host in `remotes`.
+- Without a terminal (e.g. `… -- -p` in a script), horde skips the switcher and
+  streams the single session directly.
 - Everything after `--` is passed through to `claude`.
 
 ### Host selection
@@ -290,7 +310,8 @@ the latency probe read near-zero, biasing toward remote.
 
 ### Environment variables
 
-The client (`horde`) reads `HORDE_REMOTE`, `HORDE_LATENCY_MS` (default 150),
+The client (`horde`) reads `HORDE_REMOTE`, `HORDE_REMOTES` (extra hosts the
+switcher discovers sessions on), `HORDE_LATENCY_MS` (default 150),
 `HORDE_CONNECT_TIMEOUT` (default 2), and `HORDE_ROUTER_MODEL` (default
 `claude-haiku-4-5`); it also reads `HORDE_PROJECTS` and `HORDE_CLAUDE_TOKEN_FILE`
 for the routing call, and `HORDE_HISTORY_FILE` for the interactive prompt

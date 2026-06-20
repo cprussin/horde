@@ -7,6 +7,7 @@ mod cli;
 mod config;
 mod ghwrapper;
 mod gitconfig;
+mod list;
 mod run;
 mod runtime;
 mod secrets;
@@ -29,6 +30,7 @@ Usage:
   horde-runner serve   --project <name>   (per-connection relay; reads a Hello
                                            frame on stdin, streams the session)
   horde-runner session --project <name>   (detached PTY session daemon)
+  horde-runner list                       (JSON of live sessions on this host)
 
 Run builds a bubblewrap namespace containing only /nix/store (read-only), the
 selected project directories (read-write), a private persistent HOME, the
@@ -67,5 +69,6 @@ fn real_main() -> Result<()> {
         cli::Command::Run(args) => run::run(&Config::from_env(), &args),
         cli::Command::Serve { project } => serve::serve(&Config::from_env(), &project),
         cli::Command::Session { project } => session::run(&Config::from_env(), &project),
+        cli::Command::List => list::run(),
     }
 }

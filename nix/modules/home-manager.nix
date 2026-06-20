@@ -36,7 +36,19 @@ in {
         example = "me@server.lan";
         description = ''
           SSH destination of the remote execution host.  When unset, all
-          sessions run locally.
+          sessions run locally.  New sessions are placed here (or local) by the
+          latency gate; the session switcher also discovers sessions here.
+        '';
+      };
+
+      remotes = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        example = ["me@build-a.lan" "me@build-b.lan"];
+        description = ''
+          Additional SSH destinations the session switcher discovers running
+          sessions on (in addition to `remote` and local).  Display/recovery
+          only — new sessions are still placed on `remote` (or local).
         '';
       };
 
@@ -288,6 +300,9 @@ in {
         // env-var "HORDE_ROUTER_MODEL" cfg.client.routerModel
         // env-var "HORDE_LATENCY_MS" cfg.client.latencyMs
         // env-var "HORDE_CONNECT_TIMEOUT" cfg.client.connectTimeout
+        // lib.optionalAttrs (cfg.client.remotes != []) {
+          HORDE_REMOTES = lib.concatStringsSep " " cfg.client.remotes;
+        }
       );
   };
 }

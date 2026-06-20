@@ -44,6 +44,7 @@ struct State {
 pub fn run(config: &Config, project: &str) -> Result<()> {
     let dir = runtime::dir()?;
     let sock = runtime::socket_path(&dir, project);
+    let meta = runtime::meta_path(&dir, project);
 
     let listener = match UnixListener::bind(&sock) {
         Ok(l) => l,
@@ -53,21 +54,48 @@ pub fn run(config: &Config, project: &str) -> Result<()> {
     };
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
 
-    let result = serve_loop(config, project, &sock, listener);
+    let result = serve_loop(config, project, &sock, &meta, listener);
     let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_file(&meta);
     result
+}
+
+/// Write the session metadata read by `horde-runner list`.
+fn write_meta(path: &std::path::Path, project: &str, extras: &[String]) {
+    let meta = horde_proto::SessionMeta {
+        project: project.to_string(),
+        extras: extras.to_vec(),
+        pid: std::process::id(),
+        started_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    if let Ok(json) = serde_json::to_string(&meta) {
+        if std::fs::write(path, json).is_ok() {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 fn serve_loop(
     config: &Config,
     project: &str,
     sock: &std::path::Path,
+    meta: &std::path::Path,
     listener: UnixListener,
 ) -> Result<()> {
     // The first client triggers the sandbox build (its Hello carries the
-    // launch parameters and terminal size).
-    let (mut first, _) = listener.accept().map_err(|e| anyhow!("accept: {e}"))?;
-    let hello = read_hello(&mut first)?;
+    // launch parameters and terminal size).  Accept until one actually sends a
+    // Hello; earlier connections (e.g. `horde-runner list` liveness probes)
+    // just close without one and are ignored.
+    let (first, hello) = loop {
+        let (mut conn, _) = listener.accept().map_err(|e| anyhow!("accept: {e}"))?;
+        match read_hello(&mut conn) {
+            Ok(h) => break (conn, h),
+            Err(_) => continue,
+        }
+    };
     if hello.project != project {
         bail!("session project mismatch: {} != {project}", hello.project);
     }
@@ -78,6 +106,8 @@ fn serve_loop(
 
     let sandbox = run::prepare(config, &run_args_from(&hello), &term_from(&hello))?;
     let pty = pty::spawn(&sandbox, hello.cols, hello.rows)?;
+    // The session is now live; publish its metadata for `horde-runner list`.
+    write_meta(meta, project, &hello.extras);
     let master_read = pty.master.try_clone()?;
     let master_fd = pty.master.as_raw_fd();
     let state = Arc::new(State {
@@ -102,6 +132,7 @@ fn serve_loop(
     {
         let state = Arc::clone(&state);
         let sock = sock.to_path_buf();
+        let meta = meta.to_path_buf();
         let mut child = pty.child;
         thread::spawn(move || {
             let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
@@ -109,6 +140,7 @@ fn serve_loop(
             // Give the per-client writers a moment to flush the Exit frame.
             thread::sleep(Duration::from_millis(150));
             let _ = std::fs::remove_file(&sock);
+            let _ = std::fs::remove_file(&meta);
             std::process::exit(0);
         });
     }

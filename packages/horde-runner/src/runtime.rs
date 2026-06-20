@@ -77,3 +77,7 @@ pub fn lock_path(dir: &Path, project: &str) -> PathBuf {
 pub fn log_path(dir: &Path, project: &str) -> PathBuf {
     dir.join(format!("{project}.log"))
 }
+
+pub fn meta_path(dir: &Path, project: &str) -> PathBuf {
+    dir.join(format!("{project}.json"))
+}

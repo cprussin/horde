@@ -37,6 +37,18 @@ pub enum ServerFrame {
     Error(String),
 }
 
+/// Metadata a session daemon writes alongside its socket (`<project>.json`),
+/// and the shape `horde-runner list` emits (one per live session).  The client
+/// reads these to populate the session switcher.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionMeta {
+    pub project: String,
+    pub extras: Vec<String>,
+    pub pid: u32,
+    /// Seconds since the Unix epoch when the session started.
+    pub started_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Hello {
     pub project: String,

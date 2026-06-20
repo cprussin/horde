@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horde_proto::{read_frame, write_frame, ClientFrame, Hello, ServerFrame};
+use horde_proto::{read_frame, write_frame, ClientFrame, Hello, ServerFrame, SessionMeta};
 
 struct Harness {
     _tmp: PathBuf,
@@ -53,7 +53,10 @@ fn hello(project: &str, cols: u16, rows: u16) -> ClientFrame {
 
 impl Harness {
     fn start() -> Harness {
-        let tmp = std::env::temp_dir().join(format!("horde-stream-{}", std::process::id()));
+        // Unique per instance so concurrent tests don't share a runtime dir.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("horde-stream-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         let bin = tmp.join("bin");
         let projects = tmp.join("projects");
@@ -111,6 +114,24 @@ impl Harness {
         self.runtime
             .join("horde")
             .join(format!("{}.sock", self.project))
+    }
+
+    /// Run `horde-runner list` with this harness's runtime dir.
+    fn list(&self) -> Vec<SessionMeta> {
+        let out = Command::new(env!("CARGO_BIN_EXE_horde-runner"))
+            .arg("list")
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &self._tmp)
+            .env("XDG_RUNTIME_DIR", &self.runtime)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
     }
 
     /// Connect, send Hello, and start a reader thread delivering server frames.
@@ -218,4 +239,28 @@ fn streams_input_output_resize_reattach_and_exit() {
     assert_eq!(exit_a, ServerFrame::Exit(7));
     let exit_b = b.await_frame(|f| matches!(f, ServerFrame::Exit(_)));
     assert_eq!(exit_b, ServerFrame::Exit(7));
+}
+
+#[test]
+fn list_reports_live_sessions_and_drops_them_on_exit() {
+    let h = Harness::start();
+    let mut a = h.attach(80, 24);
+    a.await_output("STUBREADY"); // session live ⇒ metadata published
+
+    let sessions = h.list();
+    assert_eq!(sessions.len(), 1, "got {sessions:?}");
+    assert_eq!(sessions[0].project, "p");
+    assert!(sessions[0].pid > 0);
+
+    // After claude exits the daemon removes its socket + metadata.
+    a.type_line("quit");
+    a.await_frame(|f| matches!(f, ServerFrame::Exit(_)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if h.list().is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "session never dropped from list");
+        thread::sleep(Duration::from_millis(50));
+    }
 }

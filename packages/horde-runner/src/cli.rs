@@ -12,6 +12,7 @@ pub enum Command {
     Run(RunArgs),
     Serve { project: String },
     Session { project: String },
+    List,
     Help,
 }
 
@@ -38,7 +39,10 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         "session" => Ok(Command::Session {
             project: parse_project(rest, "session")?,
         }),
-        other => Err(format!("unknown subcommand: {other} (run|serve|session)")),
+        "list" => Ok(Command::List),
+        other => Err(format!(
+            "unknown subcommand: {other} (run|serve|session|list)"
+        )),
     }
 }
 

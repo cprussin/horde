@@ -19,3 +19,4 @@ vt100.workspace = true
 
 [dev-dependencies]
 horde-proto.workspace = true
+serde_json.workspace = true

@@ -1,4 +1,4 @@
-//! Shell quoting for the remote ssh command string (`attach::remote_command`).
+//! Shell quoting for the remote ssh command string (`session_conn`).
 //!
 //! Single-quote wrapping: a single-quoted string reproduces its bytes verbatim
 //! (the only character it can't contain is `'` itself, handled by closing the
