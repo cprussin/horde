@@ -253,12 +253,7 @@ in {
 
     home.packages =
       lib.optional cfg.client.enable cfg.client.package
-      ++ lib.optionals cfg.server.enable [
-        cfg.runner.package
-        # tmux wraps the remote session so a dropped SSH connection doesn't
-        # kill the run.
-        pkgs.tmux
-      ];
+      ++ lib.optional cfg.server.enable cfg.runner.package;
 
     home.sessionVariables =
       # Runner variables are needed wherever sessions run: on the client for
@@ -286,6 +281,12 @@ in {
       // lib.optionalAttrs cfg.runner.allowNix {HORDE_ALLOW_NIX = "1";}
       // lib.optionalAttrs (cfg.runner.claudeSettings != null) {
         HORDE_CLAUDE_SETTINGS = builtins.toJSON cfg.runner.claudeSettings;
+      }
+      # The server wraps each remote session in tmux so a dropped SSH
+      # connection doesn't kill the run.  Referenced by absolute store path
+      # so the remote needs no tmux on PATH or in its profile.
+      // lib.optionalAttrs cfg.server.enable {
+        HORDE_TMUX = "${pkgs.tmux}/bin/tmux";
       }
       # Client-only variables: the router and host gate.
       // lib.optionalAttrs cfg.client.enable (

@@ -22,8 +22,10 @@ Project files are assumed to already exist at the same path on both machines
 
 The remote host never sees the router or any project-selection logic.  Its
 entire footprint is `horde-run` (which carries `claude-code`, `bubblewrap`,
-and `socat` with it), `tmux`, the user-namespaces sysctl, and whatever SSH
-access you already have to it.
+and `socat` with it), the user-namespaces sysctl, and whatever SSH access you
+already have to it.  `tmux` (used to wrap the session) is referenced by
+absolute store path via `HORDE_TMUX`, so it needs no install on the remote's
+PATH.
 
 ## Isolation model
 

@@ -39,6 +39,11 @@ Environment:
   HORDE_CLAUDE_TOKEN_FILE  File with a Claude credential, used to
                          authenticate the routing call when no Claude token
                          is already in the environment
+  HORDE_TMUX             tmux binary used to wrap a remote session
+                         (default: tmux on the remote's PATH); normally set
+                         to an absolute store path by the runner module
+  HORDE_HISTORY_FILE     File storing interactive prompt history (default:
+                         $XDG_STATE_HOME/horde/prompt-history)
 EOF
 }
 
@@ -47,43 +52,74 @@ die() {
   exit 1
 }
 
-# Draw a Claude Code-style input box and read the initial prompt into the
-# global $prompt.  The box is erased afterwards so the real session takes
-# its place on screen.
+# Read the initial prompt interactively into the global $prompt, backed by
+# readline: vi-mode line editing, a persistent cross-run history (up/down
+# recalls previous prompts), and multi-line composing — end a line with a
+# backslash to continue onto the next, an empty line submits.
 read_prompt() {
-  local cols border
-  cols="$(stty size < /dev/tty 2> /dev/null | cut -d' ' -f2 || true)"
-  case "$cols" in
-    '' | *[!0-9]*) cols=80 ;;
-  esac
-  [ "$cols" -ge 20 ] || cols=80
-  border="$(printf '%*s' $((cols - 2)) '' | tr ' ' '─')"
+  local line ps histfile histdir dim reset ps_main ps_cont
 
-  # Box layout: top border / input row / bottom border / hint, then move
-  # the cursor back up onto the input row to read there.
-  printf '\033[2m╭%s╮\033[0m\n' "$border"
-  printf '\n'
-  printf '\033[2m╰%s╯\033[0m\n' "$border"
-  printf '\033[2m  enter to launch · ctrl-c to cancel\033[0m\n'
-  printf '\033[3A'
+  # Persistent history shared across runs.  Lives under XDG state.
+  histfile="${HORDE_HISTORY_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/horde/prompt-history}"
+  histdir="$(dirname "$histfile")"
+  [ -d "$histdir" ] || mkdir -p "$histdir" 2> /dev/null || true
 
-  # On ctrl-c, erase the box (cursor is still on the input row) and bail.
-  trap 'printf "\r\033[1A\033[0J"; exit 130' INT
+  # Editing mode for `read -e`: vi keybindings, fed from the history file.
+  set -o vi
+  history -c
+  if [ -r "$histfile" ]; then
+    history -r "$histfile" || true
+  fi
 
-  while [ -z "$prompt" ]; do
-    if ! IFS= read -e -r -p '│ > ' prompt; then
-      # EOF (ctrl-d): erase the box and exit quietly.
-      printf '\r\033[1A\033[0J'
+  dim=$'\033[2m'
+  reset=$'\033[0m'
+  # The colour escapes in the prompts must be wrapped in \001..\002 so
+  # readline excludes them from its width accounting (otherwise long lines
+  # and history recall mis-wrap).
+  ps_main=$'\001\033[2m\002❯\001\033[0m\002 '
+  ps_cont=$'\001\033[2m\002…\001\033[0m\002 '
+
+  printf '%shorde — type a prompt; end a line with \\ to continue, enter to launch, ctrl-c to cancel%s\n' \
+    "$dim" "$reset"
+
+  # On ctrl-c, drop to a fresh line and bail without launching.
+  trap 'printf "\n"; exit 130' INT
+
+  prompt=""
+  ps="$ps_main"
+  while true; do
+    if ! IFS= read -e -r -p "$ps" line; then
+      # EOF (ctrl-d): submit if something is composed, otherwise cancel.
+      printf '\n'
+      if [ -n "$prompt" ]; then
+        break
+      fi
       exit 0
     fi
-    # Empty submission: readline moved us down a row; go back and re-read.
-    [ -n "$prompt" ] || printf '\033[1A'
+    if [ -n "$line" ] && [ "${line%\\}" != "$line" ]; then
+      # Trailing backslash: append the line (sans backslash) and continue.
+      prompt+="${line%\\}"$'\n'
+      ps="$ps_cont"
+      continue
+    fi
+    prompt+="$line"
+    # A blank submission with nothing composed yet: re-prompt instead of
+    # launching an empty session.
+    if [ -z "$prompt" ]; then
+      ps="$ps_main"
+      continue
+    fi
+    break
   done
 
   trap - INT
-  # Enter left the cursor on the bottom border row; erase from the top
-  # border down so the session starts where the box was.
-  printf '\033[2A\033[0J'
+
+  # Record the prompt for recall.  Newlines are flattened to spaces so a
+  # multi-line entry round-trips through the history file as one line.
+  if [ -n "$prompt" ]; then
+    history -s "${prompt//$'\n'/ }"
+    history -w "$histfile" 2> /dev/null || true
+  fi
 }
 
 projects_dir="${HORDE_PROJECTS:-$HOME/Projects}"
@@ -297,12 +333,18 @@ session="horde-$primary"
 # The runner's PATH and HORDE_* config come from the user's home-manager
 # session variables, which are only loaded by a login shell — so run
 # horde-run through `bash -lc`.  A second login shell wraps the whole tmux
-# invocation so tmux itself is found on PATH, and the inner one re-applies
-# the environment regardless of any already-running tmux server's env.
+# invocation so HORDE_TMUX is in scope and the inner one re-applies the
+# environment regardless of any already-running tmux server's env.
 inner_login="bash -lc $(printf '%q' "$runner_str")"
+# tmux is referenced through HORDE_TMUX (an absolute store path set by the
+# runner's home-manager module) so the remote needs no tmux on PATH; it
+# falls back to a bare `tmux` if unset.  The reference stays literal here —
+# it is expanded by the inner login shell on the remote, not by this script.
+# shellcheck disable=SC2016
+tmux_bin='${HORDE_TMUX:-tmux}'
 # tmux -A attaches if the session already exists, so a dropped connection
 # is recoverable by re-running the same command.
-tmux_cmd="tmux new-session -A -s $(printf '%q' "$session") $(printf '%q' "$inner_login")"
+tmux_cmd="$tmux_bin new-session -A -s $(printf '%q' "$session") $(printf '%q' "$inner_login")"
 remote_cmd="bash -lc $(printf '%q' "$tmux_cmd")"
 
 if [ "$dry_run" -eq 1 ]; then
