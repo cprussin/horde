@@ -20,8 +20,17 @@
       deadnix,
       alejandra,
       shellcheck,
+      cargo,
+      rustc,
+      clippy,
+      rustfmt,
       ...
-    }:
+    }: let
+      # The Rust workspace lives at the repo root; its checks run with the
+      # toolchain on PATH (cargo subcommands resolve clippy/rustfmt/rustc).
+      rust-path = lib.makeBinPath [cargo rustc clippy rustfmt];
+      with-rust = cmd: "export PATH=${rust-path}:$PATH && ${cmd}";
+    in
       lib.mkCli "cli" {
         _noAll = true;
 
@@ -34,6 +43,7 @@
             format = "${lib.getExe alejandra} --exclude ./node_modules --exclude ./third_party --check .";
           };
           scripts = "${lib.getExe shellcheck} --shell bash ./scripts/*.sh";
+          rust = with-rust "cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test";
         };
 
         fix = {
@@ -42,6 +52,7 @@
             dead-code = "${lib.getExe deadnix} -e --exclude ./node_modules ./third_party -- .";
             format = "${lib.getExe alejandra} --exclude ./node_modules --exclude ./third_party .";
           };
+          rust = with-rust "cargo fmt && cargo clippy --all-targets --fix --allow-dirty -- -D warnings";
         };
       };
 
@@ -52,6 +63,11 @@
       gh,
       claude-code,
       nodejs,
+      cargo,
+      rustc,
+      clippy,
+      rustfmt,
+      rust-analyzer,
       ...
     }:
       mkShell {
@@ -63,6 +79,11 @@
           gh
           nodejs
           claude-code
+          cargo
+          rustc
+          clippy
+          rustfmt
+          rust-analyzer
         ];
       };
 
@@ -76,8 +97,8 @@
       dev-cli = mkOverlay "dev-cli" dev-cli [mkCli.overlays.default];
       dev-shell = mkOverlay "dev-shell" dev-shell [overlays.dev-cli];
       horde-gh-app-credential = mkOverlay "horde-gh-app-credential" ./nix/packages/horde-gh-app-credential.nix [];
-      horde-run = mkOverlay "horde-run" ./nix/packages/horde-run.nix [overlays.horde-gh-app-credential];
-      horde = mkOverlay "horde" ./nix/packages/horde.nix [overlays.horde-run];
+      horde-runner = mkOverlay "horde-runner" ./nix/packages/horde-runner.nix [overlays.horde-gh-app-credential];
+      horde = mkOverlay "horde" ./nix/packages/horde.nix [overlays.horde-runner];
     };
   in
     (flake-utils.lib.eachDefaultSystem
@@ -108,7 +129,7 @@
         programs.horde.client.package =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde;
         programs.horde.runner.package =
-          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde-run;
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.horde-runner;
       };
 
       # home-manager renamed homeManagerModules to homeModules; expose both.

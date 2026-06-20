@@ -14,7 +14,7 @@ in {
   '';
 
   config = lib.mkIf cfg.enable {
-    # Both bubblewrap layers (horde-run's outer namespace and Claude Code's
+    # Both bubblewrap layers (horde-runner's outer namespace and Claude Code's
     # native sandbox nested inside it) need unprivileged user namespaces.
     # This is a kernel sysctl, so it can only be set system-wide.
     security.unprivilegedUsernsClone = lib.mkDefault true;

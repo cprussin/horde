@@ -72,7 +72,7 @@ in {
     runner = {
       package = lib.mkOption {
         type = lib.types.package;
-        description = "The package providing horde-run.";
+        description = "The package providing horde-runner (the sandboxed launcher and session service).";
       };
 
       projectsDir = lib.mkOption {
@@ -204,7 +204,7 @@ in {
         ];
         description = ''
           Packages available on PATH inside the sandbox (claude itself is
-          carried by the horde-run package).  These come from /nix/store,
+          carried by the horde-runner package).  These come from /nix/store,
           which is exposed read-only.
         '';
       };
@@ -235,7 +235,7 @@ in {
           };
         };
         description = ''
-          Settings passed to claude via --settings, replacing horde-run's
+          Settings passed to claude via --settings, replacing horde-runner's
           built-in strict inner-sandbox settings.
         '';
       };
@@ -281,12 +281,6 @@ in {
       // lib.optionalAttrs cfg.runner.allowNix {HORDE_ALLOW_NIX = "1";}
       // lib.optionalAttrs (cfg.runner.claudeSettings != null) {
         HORDE_CLAUDE_SETTINGS = builtins.toJSON cfg.runner.claudeSettings;
-      }
-      # The server wraps each remote session in tmux so a dropped SSH
-      # connection doesn't kill the run.  Referenced by absolute store path
-      # so the remote needs no tmux on PATH or in its profile.
-      // lib.optionalAttrs cfg.server.enable {
-        HORDE_TMUX = "${pkgs.tmux}/bin/tmux";
       }
       # Client-only variables: the router and host gate.
       // lib.optionalAttrs cfg.client.enable (

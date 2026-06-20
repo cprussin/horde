@@ -15,23 +15,30 @@ Project files are assumed to already exist at the same path on both machines
 
 ## Components
 
-| Piece       | Runs on | Job                                                                  |
-| ----------- | ------- | -------------------------------------------------------------------- |
-| `horde`     | client  | Catalog projects, route the prompt, gate local/remote, hand off      |
-| `horde-run` | both    | Build the isolation sandbox, inject secrets, launch the session      |
+| Piece          | Runs on | Job                                                               |
+| -------------- | ------- | ----------------------------------------------------------------- |
+| `horde`        | client  | Catalog projects, route the prompt, gate local/remote, hand off   |
+| `horde-runner` | both    | Build the isolation sandbox, inject secrets, run/serve the session |
+
+Both are Rust programs (`horde` is a ratatui terminal UI for prompt entry).
+`horde-runner` has three modes: `run` (local — launch the sandbox in this
+terminal), and `serve`/`session` (remote — a persistent PTY session streamed
+back to the client).
 
 The remote host never sees the router or any project-selection logic.  Its
-entire footprint is `horde-run` (which carries `claude-code`, `bubblewrap`,
-and `socat` with it), the user-namespaces sysctl, and whatever SSH access you
-already have to it.  `tmux` (used to wrap the session) is referenced by
-absolute store path via `HORDE_TMUX`, so it needs no install on the remote's
-PATH.
+entire footprint is `horde-runner` (which carries `claude-code` and
+`bubblewrap` with it), the user-namespaces sysctl, and whatever SSH access you
+already have to it.  No tmux, and no listening ports: the client runs
+`ssh <host> horde-runner serve`, and the runner streams claude's terminal IO
+back over that ssh pipe with a small framed protocol.  Because the `session`
+that owns claude is detached from the connection, a dropped link just detaches
+— re-running `horde` reattaches and resumes (replacing tmux's role).
 
 ## Isolation model
 
 Every session — local or remote — runs in two nested layers:
 
-1. **Outer namespace (horde-run's own bubblewrap).** A mount + PID + user
+1. **Outer namespace (horde-runner's own bubblewrap).** A mount + PID + user
    namespace whose filesystem is built from an explicit allowlist:
    - `/nix/store` (read-only) and a minimal set of `/etc` files needed for
      DNS and TLS;
@@ -107,7 +114,7 @@ load; this assumes home-manager manages the worker user's shell (the usual
 setup).
 
 The packages are also exposed directly as `packages.<system>.horde` and
-`packages.<system>.horde-run`, and as overlays, if you'd rather wire things
+`packages.<system>.horde-runner`, and as overlays, if you'd rather wire things
 up yourself.  The flake instantiates its own nixpkgs with the `claude-code`
 unfree exception, so you don't need to touch your system's `allowUnfree`
 settings.
@@ -254,9 +261,10 @@ horde --dry-run "where would this go?"
 horde --project api "summarize TODOs" -- -p   # non-interactive print mode
 ```
 
-- Bare `horde` on a terminal draws a Claude Code-style input box, reads
-  your prompt, then hands off — the box is erased and replaced by the real
-  session.
+- Bare `horde` on a terminal opens a bordered, multi-line input box (vi-mode
+  editing, with persistent prompt history recalled by `↑`/`↓` or `^p`/`^n`),
+  then shows live `routing…` / `matched` / `host` status before handing off to
+  the session.
 - `--project a,b,…` skips the router; the first project becomes the working
   directory and the rest are exposed via `--add-dir`.
 - With no `--project`, a headless call to `$HORDE_ROUTER_MODEL` (default
@@ -264,8 +272,9 @@ horde --project api "summarize TODOs" -- -p   # non-interactive print mode
   headers.
 - The session starts in the project root, so its `CLAUDE.md` is
   auto-discovered — no need to point at it explicitly.
-- Remote sessions run inside `tmux new -A`, so if the connection drops,
-  re-running the same `horde` command reattaches instead of starting over.
+- Remote sessions are owned by a detached `horde-runner session` daemon, so
+  if the connection drops, re-running the same `horde` command reattaches
+  instead of starting over.
 - Everything after `--` is passed through to `claude`.
 
 ### Host selection
@@ -281,12 +290,15 @@ the latency probe read near-zero, biasing toward remote.
 
 ### Environment variables
 
-The router (`horde`) reads `HORDE_REMOTE`, `HORDE_LATENCY_MS` (default 150),
+The client (`horde`) reads `HORDE_REMOTE`, `HORDE_LATENCY_MS` (default 150),
 `HORDE_CONNECT_TIMEOUT` (default 2), and `HORDE_ROUTER_MODEL` (default
-`claude-haiku-4-5`).  The runner (`horde-run`) reads `HORDE_PROJECTS`,
-`HORDE_STATE_DIR`, the token-file and expose-path variables, and
-`HORDE_CLAUDE_SETTINGS`.  The home-manager module sets all of these from its
-options; run `horde-run --help` for the full list if invoking it directly.
+`claude-haiku-4-5`); it also reads `HORDE_PROJECTS` and `HORDE_CLAUDE_TOKEN_FILE`
+for the routing call, and `HORDE_HISTORY_FILE` for the interactive prompt
+history (default `$XDG_STATE_HOME/horde/prompt-history`).  The runner
+(`horde-runner`) reads `HORDE_PROJECTS`, `HORDE_STATE_DIR`, the token-file and
+expose-path variables, and `HORDE_CLAUDE_SETTINGS`.  The home-manager module
+sets all of these from its options; run `horde-runner --help` for the full
+list if invoking it directly.
 
 ## Security model
 
@@ -328,7 +340,7 @@ Worth knowing:
   sockets you expose (e.g. `allowNix`'s nix daemon) are outside the proxy.
 - To stop a stray bare-host `claude --dangerously-skip-permissions` outside
   horde, set `permissions.disableBypassPermissionsMode = "disable"` in
-  managed settings — horde-run's perimeter is unaffected.
+  managed settings — horde-runner's perimeter is unaffected.
 
 ## Syncthing caveats
 
@@ -340,5 +352,9 @@ Worth knowing:
 
 ## Development
 
-`nix develop` (or direnv) drops you into a shell with a `cli` command:
-`cli test nix lint|dead-code|format`, `cli test scripts`, `cli fix nix …`.
+`nix develop` (or direnv) drops you into a shell (with the Rust toolchain) and
+a `cli` command: `cli test nix lint|dead-code|format`, `cli test scripts`
+(shellcheck), `cli test rust` (`cargo fmt --check` + clippy + `cargo test`),
+and the matching `cli fix nix …` / `cli fix rust`.  The Rust workspace is at
+the repo root (`packages/horde`, `packages/horde-runner`, `packages/horde-proto`),
+so plain `cargo build` / `cargo test` work too.

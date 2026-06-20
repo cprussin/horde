@@ -1,0 +1,10 @@
+[package]
+name = "horde-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Framed protocol shared between the horde client and runner service"
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["packages/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+horde-proto = { path = "packages/horde-proto" }
+anyhow = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+crossterm = "0.28"
+signal-hook = "0.3"
+libc = "0.2"
+vt100 = "0.15"
+ratatui = "0.29"
+tui-textarea = "0.7"
+
+[profile.release]
+strip = true
